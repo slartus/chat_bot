@@ -1,0 +1,21 @@
+name: Deploy
+
+on:
+  push:
+    branches: [main]
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Deploy to server
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ secrets.SSH_HOST }}
+          username: ${{ secrets.SSH_USER }}
+          key: ${{ secrets.SSH_PRIVATE_KEY }}
+          script: |
+            cd /opt/chat_bot
+            GIT_SSH_COMMAND='ssh -i /root/.ssh/deploy_key -o StrictHostKeyChecking=no' git pull origin main
+            /opt/chat_bot/venv/bin/pip install -r requirements.txt -q
+            systemctl restart chat_bot
