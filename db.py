@@ -161,6 +161,29 @@ async def save_daily_stats(
         await db.commit()
 
 
+async def get_user_best_days(
+    chat_id: int, user_id: int
+) -> tuple[tuple[int, date] | None, tuple[int, date] | None]:
+    """Возвращает (лучший день по сообщениям, лучший день по символам).
+    Каждый элемент — (значение, дата) или None если данных нет."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        cursor = await db.execute(
+            "SELECT msg_count, date FROM daily_stats WHERE chat_id = ? AND user_id = ? ORDER BY msg_count DESC LIMIT 1",
+            (chat_id, user_id),
+        )
+        row_msgs = await cursor.fetchone()
+
+        cursor = await db.execute(
+            "SELECT total_length, date FROM daily_stats WHERE chat_id = ? AND user_id = ? ORDER BY total_length DESC LIMIT 1",
+            (chat_id, user_id),
+        )
+        row_len = await cursor.fetchone()
+
+    best_msgs = (row_msgs[0], date.fromisoformat(row_msgs[1])) if row_msgs else None
+    best_len = (row_len[0], date.fromisoformat(row_len[1])) if row_len else None
+    return best_msgs, best_len
+
+
 @dataclass
 class RecordInfo:
     value: int

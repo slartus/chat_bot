@@ -8,7 +8,7 @@ from telegram.ext import ContextTypes
 
 from config import ALLOWED_CHAT_ID, TIMEZONE
 from date_parser import parse_period
-from db import RecordInfo, UserRecordInfo, get_daily_records, get_personal_stats, get_stats, save_daily_stats, save_message
+from db import RecordInfo, UserRecordInfo, get_daily_records, get_personal_stats, get_stats, get_user_best_days, save_daily_stats, save_message
 
 logger = logging.getLogger(__name__)
 
@@ -177,6 +177,7 @@ async def handle_personal_stats(update: Update):
     try:
         personal, total = await get_personal_stats(chat.id, user.id, None, None)
         personal_today, _ = await get_personal_stats(chat.id, user.id, today, today)
+        best_msgs, best_len = await get_user_best_days(chat.id, user.id)
     except Exception:
         logger.exception("Ошибка при получении личной статистики")
         await update.effective_message.reply_text("Произошла ошибка, попробуй позже.")
@@ -190,6 +191,11 @@ async def handle_personal_stats(update: Update):
         f"Всего сообщений: {personal} ({pct}% от всех)",
         f"Сегодня: {personal_today}",
     ]
+    if best_msgs:
+        lines.append(f"Рекорд по сообщениям: {best_msgs[0]} ({best_msgs[1].strftime('%d.%m.%Y')})")
+    if best_len:
+        lines.append(f"Рекорд по символам: {_fmt_num(best_len[0])} ({best_len[1].strftime('%d.%m.%Y')})")
+
     await update.effective_message.reply_text("\n".join(lines))
 
 
