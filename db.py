@@ -1,8 +1,9 @@
 import aiosqlite
+from dataclasses import dataclass
 from datetime import date
 
 DB_PATH = "messages.db"
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 
 async def init_db():
@@ -46,6 +47,23 @@ async def init_db():
                 "CREATE INDEX idx_chat_date ON messages(chat_id, date)"
             )
 
+        if version < 3:
+            await db.execute("""
+                CREATE TABLE IF NOT EXISTS daily_stats (
+                    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+                    chat_id      INTEGER NOT NULL,
+                    user_id      INTEGER NOT NULL,
+                    name         TEXT NOT NULL,
+                    date         TEXT NOT NULL,
+                    msg_count    INTEGER NOT NULL,
+                    total_length INTEGER NOT NULL,
+                    UNIQUE(chat_id, user_id, date)
+                )
+            """)
+            await db.execute(
+                "CREATE INDEX IF NOT EXISTS idx_daily_chat_date ON daily_stats(chat_id, date)"
+            )
+
         if version < SCHEMA_VERSION:
             await db.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
 
@@ -79,13 +97,14 @@ def _date_condition(date_from: date | None, date_to: date | None) -> tuple[str, 
 
 async def get_stats(
     chat_id: int, date_from: date | None, date_to: date | None
-) -> tuple[int, list[tuple[str, int, int]]]:
-    """Возвращает (total_msgs, [(display_name, count, total_length), ...])."""
+) -> tuple[int, list[tuple[int, str, int, int]]]:
+    """Возвращает (total_msgs, [(user_id, display_name, count, total_length), ...])."""
     cond, params = _date_condition(date_from, date_to)
     async with aiosqlite.connect(DB_PATH) as db:
         cursor = await db.execute(
             f"""
             SELECT
+                user_id,
                 COALESCE(MAX(full_name), MAX(username)) AS display_name,
                 COUNT(*) AS cnt,
                 SUM(length) AS total_length
@@ -98,7 +117,7 @@ async def get_stats(
         )
         rows = await cursor.fetchall()
 
-    total = sum(cnt for _, cnt, _ in rows)
+    total = sum(cnt for _, _, cnt, _ in rows)
     return total, rows
 
 
@@ -121,3 +140,132 @@ async def get_personal_stats(
         row = await cursor.fetchone()
 
     return (row[0] or 0, row[1] or 0) if row else (0, 0)
+
+
+async def save_daily_stats(
+    chat_id: int,
+    stats_date: date,
+    rows: list[tuple[int, str, int, int]],
+) -> None:
+    """Сохраняет агрегат дня. rows: [(user_id, name, msg_count, total_length), ...]."""
+    date_str = stats_date.strftime("%Y-%m-%d")
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.executemany(
+            """
+            INSERT OR REPLACE INTO daily_stats (chat_id, user_id, name, date, msg_count, total_length)
+            VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            [(chat_id, user_id, name, date_str, msg_count, total_length)
+             for user_id, name, msg_count, total_length in rows],
+        )
+        await db.commit()
+
+
+@dataclass
+class RecordInfo:
+    value: int
+    record_date: date
+    is_new: bool
+    prev_value: int | None
+    prev_date: date | None
+
+
+@dataclass
+class UserRecordInfo(RecordInfo):
+    user_id: int
+    name: str
+
+
+async def get_daily_records(
+    chat_id: int,
+    stats_date: date,
+) -> dict:
+    """
+    Возвращает рекорды по чату и пользователям.
+    {
+      "chat_msgs":    RecordInfo | None,
+      "chat_length":  RecordInfo | None,
+      "users_msgs":   list[UserRecordInfo],
+      "users_length": list[UserRecordInfo],
+    }
+    """
+    async with aiosqlite.connect(DB_PATH) as db:
+        cursor = await db.execute(
+            """
+            SELECT user_id, name, date, msg_count, total_length
+            FROM daily_stats
+            WHERE chat_id = ?
+            ORDER BY date
+            """,
+            (chat_id,),
+        )
+        all_rows = await cursor.fetchall()
+
+    if not all_rows:
+        return {"chat_msgs": None, "chat_length": None, "users_msgs": [], "users_length": []}
+
+    # Агрегируем чат по дням
+    from collections import defaultdict
+    chat_by_date: dict[str, tuple[int, int]] = defaultdict(lambda: (0, 0))
+    users_by_id: dict[int, list] = defaultdict(list)
+
+    for user_id, name, d, msg_count, total_length in all_rows:
+        prev_msgs, prev_len = chat_by_date[d]
+        chat_by_date[d] = (prev_msgs + msg_count, prev_len + total_length)
+        users_by_id[user_id].append((name, d, msg_count, total_length))
+
+    def _build_chat_record(field_idx: int) -> RecordInfo | None:
+        sorted_days = sorted(chat_by_date.items(), key=lambda x: x[1][field_idx], reverse=True)
+        if not sorted_days:
+            return None
+        top_date_str, top_vals = sorted_days[0]
+        top_val = top_vals[field_idx]
+        top_date = date.fromisoformat(top_date_str)
+        is_new = top_date == stats_date
+        prev_val, prev_dt = None, None
+        if is_new and len(sorted_days) > 1:
+            prev_date_str, prev_vals = sorted_days[1]
+            prev_val = prev_vals[field_idx]
+            prev_dt = date.fromisoformat(prev_date_str)
+        elif not is_new:
+            prev_val, prev_dt = None, None
+        return RecordInfo(
+            value=top_val,
+            record_date=top_date,
+            is_new=is_new,
+            prev_value=prev_val,
+            prev_date=prev_dt,
+        )
+
+    def _build_user_records(field_idx: int) -> list[UserRecordInfo]:
+        result = []
+        for user_id, entries in users_by_id.items():
+            name = entries[-1][0]
+            sorted_entries = sorted(entries, key=lambda x: x[2 + field_idx], reverse=True)
+            top = sorted_entries[0]
+            top_val = top[2 + field_idx]
+            top_date = date.fromisoformat(top[1])
+            is_new = top_date == stats_date
+            prev_val, prev_dt = None, None
+            if is_new and len(sorted_entries) > 1:
+                prev = sorted_entries[1]
+                prev_val = prev[2 + field_idx]
+                prev_dt = date.fromisoformat(prev[1])
+            result.append(UserRecordInfo(
+                value=top_val,
+                record_date=top_date,
+                is_new=is_new,
+                prev_value=prev_val,
+                prev_date=prev_dt,
+                user_id=user_id,
+                name=name,
+            ))
+        result.sort(key=lambda r: r.value, reverse=True)
+        return result
+
+    return {
+        "chat_msgs":    _build_chat_record(0),
+        "chat_length":  _build_chat_record(1),
+        "users_msgs":   _build_user_records(0),
+        "users_length": _build_user_records(1),
+    }

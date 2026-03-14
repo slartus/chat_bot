@@ -8,7 +8,7 @@ from telegram.ext import ContextTypes
 
 from config import ALLOWED_CHAT_ID, TIMEZONE
 from date_parser import parse_period
-from db import get_personal_stats, get_stats, save_message
+from db import RecordInfo, UserRecordInfo, get_daily_records, get_personal_stats, get_stats, save_daily_stats, save_message
 
 logger = logging.getLogger(__name__)
 
@@ -41,6 +41,58 @@ def _period_label(date_from: date | None, date_to: date | None) -> str:
     if date_from == date_to:
         return date_from.strftime("%d.%m.%Y")
     return f"{date_from.strftime('%d.%m.%Y')} – {date_to.strftime('%d.%m.%Y')}"
+
+
+def _fmt_record_line(label: str, today_val: int, rec: RecordInfo | UserRecordInfo) -> str | None:
+    """Формирует строку рекорда. Возвращает None если рекорд не установлен сегодня и нечего показать."""
+    if rec.prev_value is None:
+        return None
+    val_str = _fmt_num(today_val)
+    if rec.is_new:
+        prev_str = f"было: {_fmt_num(rec.prev_value)}, {rec.prev_date.strftime('%d.%m')}"
+        return f"🏆 {label}: {val_str} ({prev_str})"
+    else:
+        rec_str = f"рекорд: {_fmt_num(rec.value)}, {rec.record_date.strftime('%d.%m')}"
+        return f"{label}: {val_str} ({rec_str})"
+
+
+def _fmt_records_block(
+    total: int,
+    total_length: int,
+    rows: list[tuple[int, str, int, int]],
+    records: dict,
+) -> str:
+    lines = ["", "Рекорды дня:"]
+
+    chat_msgs_rec = records["chat_msgs"]
+    chat_len_rec = records["chat_length"]
+
+    if chat_msgs_rec:
+        line = _fmt_record_line("Чат — сообщений", total, chat_msgs_rec)
+        if line:
+            lines.append(line)
+
+    if chat_len_rec:
+        line = _fmt_record_line("Чат — символов", total_length, chat_len_rec)
+        if line:
+            lines.append(line)
+
+    user_msgs_map = {r.user_id: r for r in records["users_msgs"]}
+    user_len_map = {r.user_id: r for r in records["users_length"]}
+
+    for user_id, name, msg_count, length in rows:
+        rec_msgs = user_msgs_map.get(user_id)
+        rec_len = user_len_map.get(user_id)
+        if rec_msgs:
+            line = _fmt_record_line(f"{name} — сообщений", msg_count, rec_msgs)
+            if line:
+                lines.append(line)
+        if rec_len:
+            line = _fmt_record_line(f"{name} — символов", length, rec_len)
+            if line:
+                lines.append(line)
+
+    return "\n".join(lines) if len(lines) > 2 else ""
 
 
 async def on_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -108,7 +160,7 @@ async def handle_stats(update: Update, period_text: str):
         return
 
     lines = [f"Статистика за {label}:", f"Всего сообщений: {total}", ""]
-    for display_name, count, length in rows:
+    for _, display_name, count, length in rows:
         pct = round(count / total * 100)
         lines.append(f"{display_name} — {count} ({pct}%) · {_fmt_num(length)} симв.")
 
@@ -155,10 +207,24 @@ async def post_daily_stats(context: ContextTypes.DEFAULT_TYPE):
     if total == 0:
         return
 
+    await save_daily_stats(ALLOWED_CHAT_ID, today, rows)
+
+    try:
+        records = await get_daily_records(ALLOWED_CHAT_ID, today)
+    except Exception:
+        logger.exception("Ошибка при получении рекордов дня")
+        records = {"chat_msgs": None, "chat_length": None, "users_msgs": [], "users_length": []}
+
     label = _period_label(today, today)
     lines = [f"Итоги дня {label}:", f"Всего сообщений: {total}", ""]
-    for display_name, count, length in rows:
+    total_length = 0
+    for _, display_name, count, length in rows:
         pct = round(count / total * 100)
         lines.append(f"{display_name} — {count} ({pct}%) · {_fmt_num(length)} симв.")
+        total_length += length
+
+    records_block = _fmt_records_block(total, total_length, rows, records)
+    if records_block:
+        lines.append(records_block)
 
     await context.bot.send_message(chat_id=ALLOWED_CHAT_ID, text="\n".join(lines))
