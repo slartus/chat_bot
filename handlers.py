@@ -310,7 +310,7 @@ async def send_db_backup(context: ContextTypes.DEFAULT_TYPE):
         return
     try:
         with open(DB_PATH, "rb") as f:
-            filename = f"messages_{datetime.now().strftime('%Y%m%d')}.db"
+            filename = f"messages_{datetime.now(ZoneInfo(TIMEZONE)).strftime('%Y%m%d')}.db"
             await context.bot.send_document(
                 chat_id=ADMIN_USER_ID,
                 document=f,

@@ -1,4 +1,5 @@
 import aiosqlite
+from collections import defaultdict
 from dataclasses import dataclass
 from datetime import date
 
@@ -292,7 +293,6 @@ async def get_daily_records(
         return {"chat_msgs": None, "chat_length": None, "users_msgs": [], "users_length": []}
 
     # Агрегируем чат по дням
-    from collections import defaultdict
     chat_by_date: dict[str, tuple[int, int]] = defaultdict(lambda: (0, 0))
     users_by_id: dict[int, list] = defaultdict(list)
 
