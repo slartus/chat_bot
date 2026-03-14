@@ -7,6 +7,9 @@ BOT_TOKEN = os.environ["BOT_TOKEN"]
 TIMEZONE = os.getenv("TIMEZONE", "UTC")
 ALLOWED_CHAT_ID = int(os.environ["ALLOWED_CHAT_ID"])
 
+_admin_id = os.getenv("ADMIN_USER_ID")
+ADMIN_USER_ID: int | None = int(_admin_id) if _admin_id else None
+
 _raw_time = os.getenv("DAILY_STATS_TIME", "23:59")
 try:
     _h, _m = _raw_time.split(":")
