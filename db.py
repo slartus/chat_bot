@@ -161,6 +161,30 @@ async def save_daily_stats(
         await db.commit()
 
 
+async def backfill_daily_stats() -> int:
+    """Заполняет daily_stats из messages для всех дней кроме сегодня.
+    Возвращает количество добавленных строк."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        cursor = await db.execute(
+            """
+            INSERT OR IGNORE INTO daily_stats (chat_id, user_id, name, date, msg_count, total_length)
+            SELECT
+                chat_id,
+                user_id,
+                COALESCE(MAX(full_name), MAX(username)) AS name,
+                date,
+                COUNT(*) AS msg_count,
+                SUM(length) AS total_length
+            FROM messages
+            WHERE date < date('now')
+            GROUP BY chat_id, user_id, date
+            """
+        )
+        inserted = cursor.rowcount
+        await db.commit()
+    return inserted
+
+
 async def get_user_by_username(
     chat_id: int, username: str
 ) -> tuple[int, str] | None:
