@@ -6,14 +6,16 @@ from zoneinfo import ZoneInfo
 from telegram import Update
 from telegram.ext import ContextTypes
 
-from config import ALLOWED_CHAT_ID, TIMEZONE
+from config import ADMIN_USER_ID, ALLOWED_CHAT_ID, TIMEZONE
 from date_parser import parse_period
-from db import RecordInfo, UserRecordInfo, get_daily_records, get_personal_stats, get_stats, get_user_best_days, save_daily_stats, save_message
+from db import DB_PATH, RecordInfo, UserRecordInfo, get_daily_records, get_personal_stats, get_stats, get_top_days, get_user_best_days, get_user_by_username, save_daily_stats, save_message
 
 logger = logging.getLogger(__name__)
 
 STATS_PATTERN = re.compile(r"статистика\s+за\s+(.+?)[\s!?.]*$", re.IGNORECASE)
 PERSONAL_PATTERN = re.compile(r"моя\s+статистика", re.IGNORECASE)
+TOP_DAYS_PATTERN = re.compile(r"топ\s+дней", re.IGNORECASE)
+USER_STATS_PATTERN = re.compile(r"статистика\s+(@\w+)", re.IGNORECASE)
 
 HELP_TEXT = (
     "Я умею показывать статистику сообщений.\n\n"
@@ -26,7 +28,9 @@ HELP_TEXT = (
     "  статистика за 12.03\n"
     "  статистика за 12.03.2026\n"
     "  статистика за 01.03-13.03\n"
-    "  моя статистика"
+    "  статистика @username\n"
+    "  моя статистика\n"
+    "  топ дней"
 )
 
 
@@ -114,6 +118,10 @@ async def on_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if text.lower().startswith(f"@{bot_username}".lower()):
         if PERSONAL_PATTERN.search(text):
             await handle_personal_stats(update)
+        elif TOP_DAYS_PATTERN.search(text):
+            await handle_top_days(update)
+        elif m := USER_STATS_PATTERN.search(text):
+            await handle_user_stats(update, m.group(1))
         elif m := STATS_PATTERN.search(text):
             await handle_stats(update, m.group(1).strip())
         else:
@@ -199,6 +207,66 @@ async def handle_personal_stats(update: Update):
     await update.effective_message.reply_text("\n".join(lines))
 
 
+async def handle_top_days(update: Update):
+    chat = update.effective_chat
+    try:
+        rows = await get_top_days(chat.id)
+    except Exception:
+        logger.exception("Ошибка при получении топа дней")
+        await update.effective_message.reply_text("Произошла ошибка, попробуй позже.")
+        return
+
+    if not rows:
+        await update.effective_message.reply_text("Данных пока нет — статистика накапливается после первого ежедневного отчёта.")
+        return
+
+    lines = ["Топ дней по сообщениям:", ""]
+    for i, (d, msg_count, total_length) in enumerate(rows, 1):
+        lines.append(f"{i}. {d.strftime('%d.%m.%Y')} — {msg_count} сообщ. · {_fmt_num(total_length)} симв.")
+
+    await update.effective_message.reply_text("\n".join(lines))
+
+
+async def handle_user_stats(update: Update, username: str):
+    chat = update.effective_chat
+    tz = ZoneInfo(TIMEZONE)
+    today = datetime.now(tz).date()
+
+    try:
+        user_info = await get_user_by_username(chat.id, username)
+    except Exception:
+        logger.exception("Ошибка при поиске пользователя")
+        await update.effective_message.reply_text("Произошла ошибка, попробуй позже.")
+        return
+
+    if not user_info:
+        await update.effective_message.reply_text(f"Пользователь {username} не найден.")
+        return
+
+    user_id, display_name = user_info
+    try:
+        personal, total = await get_personal_stats(chat.id, user_id, None, None)
+        personal_today, _ = await get_personal_stats(chat.id, user_id, today, today)
+        best_msgs, best_len = await get_user_best_days(chat.id, user_id)
+    except Exception:
+        logger.exception("Ошибка при получении статистики пользователя")
+        await update.effective_message.reply_text("Произошла ошибка, попробуй позже.")
+        return
+
+    pct = round(personal / total * 100) if total else 0
+    lines = [
+        f"Статистика {display_name}:",
+        f"Всего сообщений: {personal} ({pct}% от всех)",
+        f"Сегодня: {personal_today}",
+    ]
+    if best_msgs:
+        lines.append(f"Рекорд по сообщениям: {best_msgs[0]} ({best_msgs[1].strftime('%d.%m.%Y')})")
+    if best_len:
+        lines.append(f"Рекорд по символам: {_fmt_num(best_len[0])} ({best_len[1].strftime('%d.%m.%Y')})")
+
+    await update.effective_message.reply_text("\n".join(lines))
+
+
 async def post_daily_stats(context: ContextTypes.DEFAULT_TYPE):
     """Ежедневная автоматическая сводка."""
     tz = ZoneInfo(TIMEZONE)
@@ -234,3 +302,20 @@ async def post_daily_stats(context: ContextTypes.DEFAULT_TYPE):
         lines.append(records_block)
 
     await context.bot.send_message(chat_id=ALLOWED_CHAT_ID, text="\n".join(lines))
+
+
+async def send_db_backup(context: ContextTypes.DEFAULT_TYPE):
+    """Еженедельная отправка резервной копии БД администратору."""
+    if not ADMIN_USER_ID:
+        return
+    try:
+        with open(DB_PATH, "rb") as f:
+            filename = f"messages_{datetime.now().strftime('%Y%m%d')}.db"
+            await context.bot.send_document(
+                chat_id=ADMIN_USER_ID,
+                document=f,
+                filename=filename,
+                caption="Еженедельный бэкап базы данных",
+            )
+    except Exception:
+        logger.exception("Ошибка при отправке бэкапа")

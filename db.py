@@ -161,6 +161,46 @@ async def save_daily_stats(
         await db.commit()
 
 
+async def get_user_by_username(
+    chat_id: int, username: str
+) -> tuple[int, str] | None:
+    """Ищет пользователя по username. Возвращает (user_id, display_name) или None."""
+    uname = username if username.startswith("@") else f"@{username}"
+    async with aiosqlite.connect(DB_PATH) as db:
+        cursor = await db.execute(
+            """
+            SELECT user_id, COALESCE(MAX(full_name), MAX(username)) AS display_name
+            FROM messages
+            WHERE chat_id = ? AND LOWER(username) = LOWER(?)
+            GROUP BY user_id
+            LIMIT 1
+            """,
+            (chat_id, uname),
+        )
+        row = await cursor.fetchone()
+    return (row[0], row[1]) if row else None
+
+
+async def get_top_days(
+    chat_id: int, limit: int = 10
+) -> list[tuple[date, int, int]]:
+    """Топ дней по сообщениям. Возвращает [(date, msg_count, total_length), ...]."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        cursor = await db.execute(
+            """
+            SELECT date, SUM(msg_count) AS total_msgs, SUM(total_length) AS total_len
+            FROM daily_stats
+            WHERE chat_id = ?
+            GROUP BY date
+            ORDER BY total_msgs DESC
+            LIMIT ?
+            """,
+            (chat_id, limit),
+        )
+        rows = await cursor.fetchall()
+    return [(date.fromisoformat(r[0]), r[1], r[2]) for r in rows]
+
+
 async def get_user_best_days(
     chat_id: int, user_id: int
 ) -> tuple[tuple[int, date] | None, tuple[int, date] | None]:
