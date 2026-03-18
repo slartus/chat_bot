@@ -1,6 +1,6 @@
 import logging
 import re
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from zoneinfo import ZoneInfo
 
 from telegram import Update
@@ -9,6 +9,7 @@ from telegram.ext import ContextTypes
 from config import ADMIN_USER_ID, ALLOWED_CHAT_ID, TIMEZONE
 from date_parser import parse_period
 from db import DB_PATH, RecordInfo, UserRecordInfo, get_daily_records, get_personal_stats, get_stats, get_top_days, get_user_best_days, get_user_by_username, save_daily_stats, save_message
+from holidays import get_holidays
 
 logger = logging.getLogger(__name__)
 
@@ -16,6 +17,7 @@ STATS_PATTERN = re.compile(r"статистика\s+за\s+(.+?)[\s!?.]*$", re.I
 PERSONAL_PATTERN = re.compile(r"моя\s+статистика", re.IGNORECASE)
 TOP_DAYS_PATTERN = re.compile(r"топ\s+дней", re.IGNORECASE)
 USER_STATS_PATTERN = re.compile(r"статистика\s+(@\w+)", re.IGNORECASE)
+HOLIDAY_PATTERN = re.compile(r"праздник\s+(сегодня|завтра)", re.IGNORECASE)
 
 HELP_TEXT = (
     "Я умею показывать статистику сообщений.\n\n"
@@ -30,7 +32,9 @@ HELP_TEXT = (
     "  статистика за 01.03-13.03\n"
     "  статистика @username\n"
     "  моя статистика\n"
-    "  топ дней"
+    "  топ дней\n"
+    "  праздник сегодня\n"
+    "  праздник завтра"
 )
 
 
@@ -120,6 +124,8 @@ async def on_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await handle_personal_stats(update)
         elif TOP_DAYS_PATTERN.search(text):
             await handle_top_days(update)
+        elif m := HOLIDAY_PATTERN.search(text):
+            await handle_holiday(update, m.group(1).lower())
         elif m := USER_STATS_PATTERN.search(text):
             await handle_user_stats(update, m.group(1))
         elif m := STATS_PATTERN.search(text):
@@ -264,6 +270,31 @@ async def handle_user_stats(update: Update, username: str):
     if best_len:
         lines.append(f"Рекорд по символам: {_fmt_num(best_len[0])} ({best_len[1].strftime('%d.%m.%Y')})")
 
+    await update.effective_message.reply_text("\n".join(lines))
+
+
+async def handle_holiday(update: Update, when: str):
+    tz = ZoneInfo(TIMEZONE)
+    today = datetime.now(tz).date()
+    d = today if when == "сегодня" else today + timedelta(days=1)
+
+    try:
+        names = await get_holidays(d)
+    except Exception:
+        logger.exception("Ошибка при получении праздников")
+        await update.effective_message.reply_text("Произошла ошибка, попробуй позже.")
+        return
+
+    label = "Сегодня" if when == "сегодня" else "Завтра"
+    date_str = d.strftime("%d.%m.%Y")
+
+    if not names:
+        await update.effective_message.reply_text(f"{label} ({date_str}) праздников не найдено.")
+        return
+
+    lines = [f"🎉 {label} ({date_str}):"]
+    for name in names:
+        lines.append(f"• {name}")
     await update.effective_message.reply_text("\n".join(lines))
 
 
